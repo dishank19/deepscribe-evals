@@ -58,6 +58,17 @@ def emit_records(records: Iterable[dict], path: Path | None, append: bool = Fals
             print(json.dumps(record, ensure_ascii=False))
         return
 
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        if append:
+            raise ValueError("Append mode is not supported for JSON output; omit --append or use a JSONL file.")
+        materialized = list(records)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(materialized, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return
+
     mode = "a" if append else "w"
     write_jsonl(records, path, mode=mode)
 

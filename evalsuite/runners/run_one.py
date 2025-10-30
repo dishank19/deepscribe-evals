@@ -44,6 +44,14 @@ def output_record(record: dict, path: Path | None) -> None:
         print(json.dumps(display, ensure_ascii=False, indent=2))
         return
 
+    suffix = path.suffix.lower()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".json":
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return
+
     write_jsonl([record], path, mode="a")
 
 

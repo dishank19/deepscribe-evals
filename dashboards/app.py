@@ -10,6 +10,9 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
+from pydantic import BaseModel
+from pydantic_ai import Agent
+from pydantic_ai.models import ModelSettings
 
 # Ensure project root is importable when running `streamlit run`
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,57 @@ SECTION_NAMES = {"S": "Subjective", "O": "Objective", "A": "Assessment", "P": "P
 
 DATA_DIR = Path("data/augmented")
 DEFAULT_PATTERN = "*scored*.jsonl"
+
+FALLBACK_ISSUE_MARKERS = {"Judge fallback failed", "Judge fallback failed (504)"}
+
+METRIC_DESCRIPTIONS = {
+    "summac_overall": (
+        "SummaC is a factual consistency score based on Natural Language Inference. "
+        "It estimates how well each SOAP section is supported by the transcript. "
+        "Scores close to 1.0 indicate strong grounding; lower scores point to missing or hallucinatory content."
+    ),
+    "judge_consistency": "0–5: factual alignment between the AI SOAP section and the transcript.",
+    "judge_completeness": "0–5: coverage of clinically important facts from the transcript.",
+    "judge_coherence": "0–5: logical SOAP organisation and readability.",
+    "judge_fluency": "0–5: clarity and professional tone.",
+    "judge_coverage": "0–5: when a clinician gold note is available, this reflects overlap with it.",
+}
+
+OVERVIEW_SYSTEM_PROMPT = """
+You are helping a clinical QA team interpret automated SOAP-note evaluations.
+Given dataset statistics captured in JSON, write at most 3 tight sentences covering:
+- overall consistency and coverage trends,
+- common missing or unsupported findings,
+- any reliability caveats or follow-up actions.
+Return the OverviewSummary JSON exactly.
+""".strip()
+
+
+class OverviewSummary(BaseModel):
+    summary: str
+
+
+SUMMARY_MODEL_SETTINGS = ModelSettings(temperature=0.0)
+
+
+@st.cache_resource(show_spinner=False)
+def _overview_agent() -> Agent:
+    return Agent(model=judge_cfg.model, output_type=OverviewSummary, system_prompt=OVERVIEW_SYSTEM_PROMPT)
+
+
+@st.cache_data(show_spinner=False)
+def generate_overview_summary(payload: Dict[str, object]) -> str:
+    agent = _overview_agent()
+    try:
+        result = agent.run_sync(
+            f"DATA SNAPSHOT:\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
+            model_settings=SUMMARY_MODEL_SETTINGS,
+        )
+        return result.output.summary.strip()
+    except Exception:
+        return (
+            "Summary unavailable right now. Review the metrics above, or rerun once the model endpoint is reachable."
+        )
 
 
 @st.cache_data(show_spinner=False)
@@ -79,8 +133,14 @@ def render_overview(df: pd.DataFrame) -> None:
         else:
             st.metric("Coverage vs. gold", "—")
 
-    st.divider()
-    st.subheader("Frequent judge findings")
+    with st.expander("What do these metrics mean?", expanded=False):
+        st.markdown(f"- **SummaC overall** – {METRIC_DESCRIPTIONS['summac_overall']}")
+        st.markdown(
+            "- **Judge consistency/completeness/coherence/fluency** – "
+            " consistency (truthfulness), completeness (coverage), coherence (structure), fluency (writing quality) scored 0–5."
+        )
+        st.markdown(f"- **Judge coverage** – {METRIC_DESCRIPTIONS['judge_coverage']}")
+        st.caption("Counts in parentheses show how many notes triggered each issue.")
 
     issue_counts = {"missing": Counter(), "unsupported": Counter(), "clinical_errors": Counter()}
     for sections in df["judge_sections"]:
@@ -89,17 +149,59 @@ def render_overview(df: pd.DataFrame) -> None:
         for section_key, section_data in sections.items():
             issues = section_data.get("issues", {})
             for category in issue_counts:
-                issue_counts[category].update(issues.get(category, []))
+                filtered = [
+                    entry for entry in issues.get(category, []) if entry not in FALLBACK_ISSUE_MARKERS
+                ]
+                issue_counts[category].update(filtered)
 
-    cols = st.columns(3)
-    for idx, category in enumerate(issue_counts):
-        with cols[idx]:
-            st.markdown(f"**{category.replace('_', ' ').title()}**")
-            top_items = issue_counts[category].most_common(5)
-            if not top_items:
-                st.caption("No findings")
-            for item, count in top_items:
-                st.write(f"- {item} ({count})")
+    judge_means: Dict[str, Optional[float]] = {}
+    for metric in ["consistency", "completeness", "coherence", "fluency", "coverage"]:
+        column = f"judge_{metric}"
+        if column in df and df[column].notna().any():
+            mean_value = df[column].mean()
+            judge_means[metric] = round(float(mean_value), 3) if pd.notna(mean_value) else None
+        else:
+            judge_means[metric] = None
+    sumac_flag_count = int(
+        sum(len(flags or []) for flags in df["summac_flags"] if isinstance(flags, list))
+    )
+    issue_counts_payload = {
+        category: issue_counts[category].most_common(5)
+        for category in issue_counts
+    }
+    coverage_available = int(df["gold_soap"].apply(lambda x: bool(x)).sum())
+
+    summary_context = {
+        "rows": n_rows,
+        "sumac": {
+            "average": round(avg_sumac, 3) if pd.notna(avg_sumac) else None,
+            "below_threshold": int(below),
+            "threshold": summac_cfg.min_overall,
+            "flagged_sections": sumac_flag_count,
+        },
+        "judge_scores": judge_means,
+        "issue_counts": issue_counts_payload,
+        "coverage": {
+            "available_rows": coverage_available,
+            "average_score": judge_means.get("coverage"),
+        },
+    }
+
+    summary_text = generate_overview_summary(summary_context)
+    st.divider()
+    st.subheader("LLM overview")
+    st.write(summary_text)
+
+    with st.expander("Frequent judge findings", expanded=False):
+        cols = st.columns(3)
+        for idx, category in enumerate(issue_counts):
+            with cols[idx]:
+                st.markdown(f"**{category.replace('_', ' ').title()}**")
+                top_items = issue_counts[category].most_common(5)
+                if not top_items:
+                    st.caption("No findings")
+                for item, count in top_items:
+                    st.write(f"- {item} ({count})")
 
 
 def render_row_view(df: pd.DataFrame) -> None:
@@ -144,6 +246,10 @@ def render_row_view(df: pd.DataFrame) -> None:
     ]
     for col, (label, value) in zip(score_cols, metrics):
         col.metric(label, f"{value:.3f}" if pd.notna(value) else "—")
+        key = label.lower().replace(" ", "_")
+        description = METRIC_DESCRIPTIONS.get(key)
+        if description:
+            col.caption(description)
 
     st.caption("Text artefacts")
     with st.expander("Transcript", expanded=False):
@@ -169,10 +275,11 @@ def render_row_view(df: pd.DataFrame) -> None:
             st.markdown("**Scores**")
             st.write({k: round(v, 3) for k, v in scores.items()})
             for category, items in section_data.get("issues", {}).items():
-                if not items:
+                filtered_items = [item for item in items if item not in FALLBACK_ISSUE_MARKERS]
+                if not filtered_items:
                     continue
                 st.markdown(f"- **{category.replace('_', ' ').title()}**")
-                for item in items:
+                for item in filtered_items:
                     st.write(f"  - {item}")
             summary = section_data.get("summary")
             if summary:

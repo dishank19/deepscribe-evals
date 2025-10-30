@@ -8,14 +8,9 @@ from functools import lru_cache
 from typing import Dict, List, Optional
 
 import anyio
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent, exceptions
 from pydantic_ai.models import ModelSettings
-from pydantic_evals.evaluators.llm_as_a_judge import (
-    judge_input_output,
-    judge_input_output_expected,
-    set_default_judge_model,
-)
 
 from evalsuite.config import judge as judge_config
 from evalsuite.metrics.registry import register
@@ -50,45 +45,25 @@ class CoverageEvaluation(BaseModel):
     summary: Optional[str] = None
 
 
-EVAL_RUBRIC = """
-You are grading a SOAP section against the transcript. Return JSON:
-{
-  "scores": {"consistency": float, "completeness": float, "coherence": float, "fluency": float},
-  "issues": {"missing": [string], "unsupported": [string], "clinical_errors": [string]},
-  "summary": string|null
-}
-Rules: scores 0–5; `missing` top 3 omissions; `unsupported` top 2 hallucinations; `clinical_errors` at most 1 key risk (omit if none); `summary` ≤1 short sentence or null.
+SECTION_SYSTEM_PROMPT = """
+You are a clinical QA evaluator. Judge one SOAP section against the source transcript.
+- Always return the full SectionEvaluation schema with all keys present, even when values are empty.
+- Populate `scores` (consistency, completeness, coherence, fluency) with floats in [0, 5]; use 0.0 when unsure.
+- List up to 3 omissions in `issues.missing`, up to 2 hallucinations in `issues.unsupported`, and at most 1 safety-critical problem in `issues.clinical_errors`.
+- Provide a concise one-sentence `summary` or null when nothing notable.
+- If the transcript gives no evidence for the section, still respond with the schema using zeros and explain in the summary.
+Answer strictly with the schema; never add commentary outside the JSON object.
 """.strip()
 
 
-COVERAGE_RUBRIC = """
-Compare AI SOAP to the clinician reference. Return JSON:
-{
-  "coverage_score": float,
-  "missing_from_ai": [string],
-  "extraneous_in_ai": [string],
-  "summary": string|null
-}
-Rules: scores 0–5; list up to 3 items in `missing_from_ai` and `extraneous_in_ai`; summary ≤1 sentence or null.
-""".strip()
-
-
-FALLBACK_SECTION_SYSTEM = """
-Produce the JSON schema exactly:
-- Scores 0–5.
-- `missing`: up to 3 key omissions.
-- `unsupported`: up to 2 hallucinations.
-- `clinical_errors`: at most 1 risk (omit if none).
-- `summary`: ≤1 short sentence or null.
-""".strip()
-
-
-FALLBACK_COVERAGE_SYSTEM = """
-Produce the JSON schema exactly:
-- `coverage_score` 0–5.
-- `missing_from_ai`: up to 3 omissions.
-- `extraneous_in_ai`: up to 3 extras.
-- `summary`: ≤1 short sentence or null.
+COVERAGE_SYSTEM_PROMPT = """
+Compare one AI SOAP section to the clinician reference.
+- Always return the full CoverageEvaluation schema with all keys present.
+- `coverage_score` must be a float in [0, 5]; use 0.0 when unsure.
+- List up to 3 omissions in `missing_from_ai` and up to 3 extras in `extraneous_in_ai`.
+- Provide a one-sentence `summary` or null.
+- If the reference is empty, still respond with the schema (score 0.0 and empty lists).
+Answer strictly with the schema; never add commentary outside the JSON object.
 """.strip()
 
 
@@ -132,35 +107,30 @@ def _model_name() -> str:
 
 
 @lru_cache(maxsize=1)
-def _model_settings() -> Optional[ModelSettings]:
-    prefix = _model_name().split(":", 1)[0]
-    if prefix in {"openai", "cerebras"}:
-        return ModelSettings(response_format={"type": "json_object"})
-    return None
-
-
-@lru_cache(maxsize=1)
 def _section_agent() -> Agent:
-    return Agent(model=_model_name(), output_type=SectionEvaluation, system_prompt=FALLBACK_SECTION_SYSTEM)
+    return Agent(model=_model_name(), output_type=SectionEvaluation, system_prompt=SECTION_SYSTEM_PROMPT)
 
 
 @lru_cache(maxsize=1)
 def _coverage_agent() -> Agent:
-    return Agent(model=_model_name(), output_type=CoverageEvaluation, system_prompt=FALLBACK_COVERAGE_SYSTEM)
+    return Agent(model=_model_name(), output_type=CoverageEvaluation, system_prompt=COVERAGE_SYSTEM_PROMPT)
 
 
-def _loads(payload: str) -> Optional[dict]:
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
+@lru_cache(maxsize=1)
+def _model_settings() -> ModelSettings:
+    return ModelSettings(temperature=0.0)
 
 
 def _clamp_sections(evaluation: SectionEvaluation) -> SectionEvaluation:
-    data = evaluation.model_dump()
-    for metric, value in data["scores"].items():
-        data["scores"][metric] = float(max(0.0, min(value, 5.0)))
-    return SectionEvaluation.model_validate(data)
+    scores = evaluation.scores
+    clamped_scores = SectionScores(
+        consistency=float(max(0.0, min(scores.consistency, 5.0))),
+        completeness=float(max(0.0, min(scores.completeness, 5.0))),
+        coherence=float(max(0.0, min(scores.coherence, 5.0))),
+        fluency=float(max(0.0, min(scores.fluency, 5.0))),
+    )
+    issues = evaluation.issues.model_copy(deep=True)
+    return SectionEvaluation(scores=clamped_scores, issues=issues, summary=evaluation.summary)
 
 
 def _clamp_coverage(value: float) -> float:
@@ -178,33 +148,28 @@ async def _score_section(section: str, transcript: str, ai_text: str) -> Section
             summary="Section contained no content to evaluate.",
         )
 
-    for _ in range(judge_config.max_retries):
-        try:
-            grading = await judge_input_output(
-                inputs=f"Transcript:\n{transcript.strip()}",
-                output=f"{SECTION_NAMES[section]} section:\n{ai_text}",
-                rubric=EVAL_RUBRIC,
-                model=_model_name(),
-                model_settings=_model_settings(),
-            )
-            parsed = _loads(grading.reason)
-            if parsed is not None:
-                return _clamp_sections(SectionEvaluation.model_validate(parsed))
-        except ValidationError:
-            break
-        except Exception:
-            break
-
     prompt = SECTION_TEMPLATE.format(transcript=transcript.strip(), section_name=SECTION_NAMES[section], ai_section=ai_text)
-    try:
-        fallback = await _section_agent().run(prompt, model_settings=_model_settings())
-        return _clamp_sections(fallback.output)
-    except Exception:
-        return SectionEvaluation(
-            scores=SectionScores(consistency=0.0, completeness=0.0, coherence=0.0, fluency=0.0),
-            issues=SectionIssues(missing=["Judge fallback failed"], unsupported=[], clinical_errors=[]),
-            summary="Judge fallback failed",
-        )
+    last_error: Optional[Exception] = None
+    retries = max(1, judge_config.max_retries)
+    for _ in range(retries):
+        try:
+            result = await _section_agent().run(prompt, model_settings=_model_settings())
+            return _clamp_sections(result.output)
+        except exceptions.UnexpectedModelBehavior as exc:
+            last_error = exc
+            await asyncio.sleep(0.5)
+            continue
+        except Exception as exc:  # pragma: no cover - transport or API issues
+            last_error = exc
+            await asyncio.sleep(0.5)
+            continue
+
+    summary = "Judge failed" if last_error else "Judge returned no result"
+    return SectionEvaluation(
+        scores=SectionScores(consistency=0.0, completeness=0.0, coherence=0.0, fluency=0.0),
+        issues=SectionIssues(missing=[summary], unsupported=[], clinical_errors=[]),
+        summary=summary,
+    )
 
 
 async def _score_coverage(section: str, transcript: str, ai_text: str, reference: str) -> CoverageEvaluation:
@@ -212,39 +177,31 @@ async def _score_coverage(section: str, transcript: str, ai_text: str, reference
     if not reference:
         return CoverageEvaluation(coverage_score=0.0, summary=None)
 
-    for _ in range(judge_config.max_retries):
-        try:
-            grading = await judge_input_output_expected(
-                inputs=f"Transcript:\n{transcript.strip()}",
-                output=f"AI {SECTION_NAMES[section]} section:\n{ai_text.strip()}",
-                expected_output=f"Reference {SECTION_NAMES[section]} section:\n{reference}",
-                rubric=COVERAGE_RUBRIC,
-                model=_model_name(),
-                model_settings=_model_settings(),
-            )
-            parsed = _loads(grading.reason)
-            if parsed is not None:
-                coverage = CoverageEvaluation.model_validate(parsed)
-                coverage.coverage_score = _clamp_coverage(coverage.coverage_score)
-                return coverage
-        except ValidationError:
-            break
-        except Exception:
-            break
-
     prompt = COVERAGE_TEMPLATE.format(
         transcript=transcript.strip(),
         section_name=SECTION_NAMES[section],
         reference_section=reference,
         ai_section=ai_text.strip(),
     )
-    try:
-        fallback = await _coverage_agent().run(prompt, model_settings=_model_settings())
-        coverage = fallback.output
-        coverage.coverage_score = _clamp_coverage(coverage.coverage_score)
-        return coverage
-    except Exception:
-        return CoverageEvaluation(coverage_score=0.0, summary="Coverage fallback failed")
+    last_error: Optional[Exception] = None
+    retries = max(1, judge_config.max_retries)
+    for _ in range(retries):
+        try:
+            result = await _coverage_agent().run(prompt, model_settings=_model_settings())
+            coverage = result.output
+            coverage.coverage_score = _clamp_coverage(coverage.coverage_score)
+            return coverage
+        except exceptions.UnexpectedModelBehavior as exc:
+            last_error = exc
+            await asyncio.sleep(0.5)
+            continue
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            await asyncio.sleep(0.5)
+            continue
+
+    summary = "Coverage judge failed" if last_error else None
+    return CoverageEvaluation(coverage_score=0.0, summary=summary)
 
 
 def _average(per_section: Dict[str, SectionEvaluation], metric: str) -> float:
@@ -256,7 +213,7 @@ def _collect_issues(per_section: Dict[str, SectionEvaluation]) -> Dict[str, List
     collected: Dict[str, List[str]] = {"missing": [], "unsupported": [], "clinical_errors": []}
     for key, evaluation in per_section.items():
         prefix = SECTION_NAMES[key]
-        for issue_type, entries in evaluation.issues.model_dump().items():
+        for issue_type, entries in json.loads(evaluation.issues.model_dump_json()).items():
             for entry in entries:
                 collected[issue_type].append(f"{prefix}: {entry}")
     return {name: items for name, items in collected.items() if items}
@@ -280,8 +237,6 @@ def _coverage_summary(results: Dict[str, CoverageEvaluation]) -> Optional[Dict[s
 
 
 def run_llm_judge(transcript: str, ai_soap: Dict[str, str], gold_soap: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, List[str]]]:
-    set_default_judge_model(_model_name())
-
     async def evaluate() -> Dict[str, Dict[str, List[str]]]:
         per_section = dict(zip(SECTION_KEYS, await asyncio.gather(*[
             _score_section(section, transcript, ai_soap.get(section, ""))
@@ -316,13 +271,22 @@ def run_llm_judge(transcript: str, ai_soap: Dict[str, str], gold_soap: Optional[
         sections_payload = {}
         for section, evaluation in per_section.items():
             payload: Dict[str, object] = {
-                "scores": evaluation.scores.model_dump(),
-                "issues": evaluation.issues.model_dump(),
+                "scores": json.loads(evaluation.scores.model_dump_json()),
+                "issues": json.loads(evaluation.issues.model_dump_json()),
                 "summary": evaluation.summary,
-                "overall": round(sum(evaluation.scores.model_dump().values()) / 4.0, 3),
+                "overall": round(
+                    (
+                        evaluation.scores.consistency
+                        + evaluation.scores.completeness
+                        + evaluation.scores.coherence
+                        + evaluation.scores.fluency
+                    )
+                    / 4.0,
+                    3,
+                ),
             }
             if section in coverage_results:
-                payload["coverage"] = coverage_results[section].model_dump()
+                payload["coverage"] = json.loads(coverage_results[section].model_dump_json())
             sections_payload[section] = payload
 
         result: Dict[str, Dict[str, List[str]]] = {
