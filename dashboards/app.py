@@ -92,6 +92,8 @@ def load_dataset(path: Path) -> pd.DataFrame:
         for line in handle:
             raw = json.loads(line)
             metrics = raw.get("metrics", {})
+            llm_judge = metrics.get("llm_judge", {})
+            baseline = llm_judge.get("baseline", {})
             row = {
                 "id": raw.get("id"),
                 "transcript": raw.get("transcript", ""),
@@ -100,9 +102,12 @@ def load_dataset(path: Path) -> pd.DataFrame:
                 "summac_overall": metrics.get("summac", {}).get("scores", {}).get("overall"),
                 "summac_sections": metrics.get("summac", {}).get("scores", {}),
                 "summac_flags": metrics.get("summac", {}).get("issues", {}).get("thresholds", []),
-                "judge_scores": metrics.get("llm_judge", {}).get("scores", {}),
-                "judge_sections": metrics.get("llm_judge", {}).get("sections", {}),
-                "judge_issues": metrics.get("llm_judge", {}).get("issues", {}),
+                "judge_scores": llm_judge.get("scores", {}),
+                "judge_sections": llm_judge.get("sections", {}),
+                "judge_issues": llm_judge.get("issues", {}),
+                "judge_baseline_scores": baseline.get("scores", {}),
+                "judge_baseline_sections": baseline.get("sections", {}),
+                "judge_deltas": llm_judge.get("deltas", {}),
                 "rouge_scores": metrics.get("rouge", {}).get("scores", {}),
                 "bertscore_scores": metrics.get("bertscore", {}).get("scores", {}),
             }
@@ -112,6 +117,12 @@ def load_dataset(path: Path) -> pd.DataFrame:
     if not df.empty:
         for metric in ["consistency", "completeness", "coherence", "fluency", "coverage"]:
             df[f"judge_{metric}"] = df["judge_scores"].apply(
+                lambda scores: scores.get(metric) if isinstance(scores, dict) else None
+            )
+            df[f"judge_baseline_{metric}"] = df["judge_baseline_scores"].apply(
+                lambda scores: scores.get(metric) if isinstance(scores, dict) else None
+            )
+            df[f"judge_delta_{metric}"] = df["judge_deltas"].apply(
                 lambda scores: scores.get(metric) if isinstance(scores, dict) else None
             )
         df["rouge_overall_rougeL"] = df["rouge_scores"].apply(
@@ -139,11 +150,15 @@ def load_bad_examples_summary(path: Path) -> Optional[Dict[str, float]]:
     rouge_series = pd.to_numeric(df["rouge_overall_rougeL"], errors="coerce")
     bert_series = pd.to_numeric(df["bertscore_overall_f1"], errors="coerce")
     judge_series = pd.to_numeric(df["judge_consistency"], errors="coerce")
+    judge_baseline_series = pd.to_numeric(df.get("judge_baseline_consistency"), errors="coerce")
+    judge_delta_series = pd.to_numeric(df.get("judge_delta_consistency"), errors="coerce")
     summary = {
         "rows": len(df),
         "rouge_avg": round(rouge_series.mean(), 3) if rouge_series.notna().any() else None,
         "bertscore_avg": round(bert_series.mean(), 3) if bert_series.notna().any() else None,
         "judge_consistency": round(judge_series.mean(), 3) if judge_series.notna().any() else None,
+        "judge_baseline_consistency": round(judge_baseline_series.mean(), 3) if judge_baseline_series.notna().any() else None,
+        "judge_delta_consistency": round(judge_delta_series.mean(), 3) if judge_delta_series.notna().any() else None,
         "rouge_flags": int(df["rouge_flag"].fillna(False).sum()) if "rouge_flag" in df else 0,
         "bertscore_flags": int(df["bertscore_flag"].fillna(False).sum()) if "bertscore_flag" in df else 0,
     }
@@ -153,41 +168,67 @@ def load_bad_examples_summary(path: Path) -> Optional[Dict[str, float]]:
 def render_overview(df: pd.DataFrame) -> None:
     st.subheader("Aggregated metrics")
     n_rows = len(df)
-    cards = st.columns(3)
+    primary_cards = st.columns(4)
 
-    with cards[0]:
-        avg_sumac = df["summac_overall"].mean()
-        below = df["summac_overall"].lt(summac_cfg.min_overall).sum()
+    sumac_series = pd.to_numeric(df["summac_overall"], errors="coerce")
+    avg_sumac = sumac_series.mean()
+    below = sumac_series.lt(summac_cfg.min_overall).sum() if not sumac_series.empty else 0
+    with primary_cards[0]:
         st.metric(
             "SummaC overall",
             f"{avg_sumac:.3f}" if pd.notna(avg_sumac) else "—",
             f"{below}/{n_rows} below {summac_cfg.min_overall}",
         )
-    with cards[1]:
-        avg_consistency = df["judge_consistency"].mean()
-        st.metric("Judge consistency", f"{avg_consistency:.3f}" if pd.notna(avg_consistency) else "—")
-    with cards[2]:
-        if df["judge_coverage"].notna().any():
-            avg_cov = df["judge_coverage"].mean()
-            st.metric("Coverage vs. gold", f"{avg_cov:.3f}" if pd.notna(avg_cov) else "—")
-        else:
-            st.metric("Coverage vs. gold", "—")
 
-    extra_cards = st.columns(2)
     bert_series = pd.to_numeric(df["bertscore_overall_f1"], errors="coerce")
+    avg_bertscore = bert_series.mean()
+    with primary_cards[1]:
+        st.metric("BERTScore F1", f"{avg_bertscore:.3f}" if pd.notna(avg_bertscore) else "—")
+
     rouge_series = pd.to_numeric(df["rouge_overall_rougeL"], errors="coerce")
-    with extra_cards[0]:
-        avg_bertscore = bert_series.mean()
+    avg_rouge = rouge_series.mean()
+    with primary_cards[2]:
+        st.metric("ROUGE-L", f"{avg_rouge:.3f}" if pd.notna(avg_rouge) else "—")
+
+    coverage_series = pd.to_numeric(df["judge_coverage"], errors="coerce") if "judge_coverage" in df else pd.Series(dtype=float)
+    avg_cov = coverage_series.mean() if not coverage_series.empty else float("nan")
+    baseline_cov = pd.to_numeric(df.get("judge_baseline_coverage"), errors="coerce").mean() if "judge_baseline_coverage" in df else float("nan")
+    delta_cov = pd.to_numeric(df.get("judge_delta_coverage"), errors="coerce").mean() if "judge_delta_coverage" in df else float("nan")
+    coverage_delta_text = None
+    if pd.notna(delta_cov):
+        if pd.notna(baseline_cov):
+            coverage_delta_text = f"{delta_cov:+.3f} vs gold {baseline_cov:.3f}"
+        else:
+            coverage_delta_text = f"{delta_cov:+.3f}"
+    with primary_cards[3]:
         st.metric(
-            "BERTScore F1",
-            f"{avg_bertscore:.3f}" if pd.notna(avg_bertscore) else "—",
+            "Judge coverage",
+            f"{avg_cov:.3f}" if pd.notna(avg_cov) else "—",
+            coverage_delta_text,
         )
-    with extra_cards[1]:
-        avg_rouge = rouge_series.mean()
-        st.metric(
-            "ROUGE-L",
-            f"{avg_rouge:.3f}" if pd.notna(avg_rouge) else "—",
-        )
+
+    judge_metrics = ["consistency", "completeness", "coherence", "fluency"]
+    judge_ai_means: Dict[str, Optional[float]] = {}
+    judge_baseline_means: Dict[str, Optional[float]] = {}
+    judge_delta_means: Dict[str, Optional[float]] = {}
+    for metric in judge_metrics:
+        judge_ai_means[metric] = pd.to_numeric(df.get(f"judge_{metric}"), errors="coerce").mean()
+        judge_baseline_means[metric] = pd.to_numeric(df.get(f"judge_baseline_{metric}"), errors="coerce").mean()
+        judge_delta_means[metric] = pd.to_numeric(df.get(f"judge_delta_{metric}"), errors="coerce").mean()
+
+    judge_cols = st.columns(len(judge_metrics))
+    for col, metric in zip(judge_cols, judge_metrics):
+        label = f"Judge {metric}"
+        avg_value = judge_ai_means.get(metric)
+        avg_baseline = judge_baseline_means.get(metric)
+        avg_delta = judge_delta_means.get(metric)
+        delta_text = None
+        if pd.notna(avg_delta):
+            if pd.notna(avg_baseline):
+                delta_text = f"{avg_delta:+.3f} vs gold {avg_baseline:.3f}"
+            else:
+                delta_text = f"{avg_delta:+.3f}"
+        col.metric(label, f"{avg_value:.3f}" if pd.notna(avg_value) else "—", delta_text)
 
     with st.expander("What do these metrics mean?", expanded=False):
         st.markdown(f"- **SummaC overall** – {METRIC_DESCRIPTIONS['summac_overall']}")
@@ -210,14 +251,27 @@ def render_overview(df: pd.DataFrame) -> None:
                 ]
                 issue_counts[category].update(filtered)
 
-    judge_means: Dict[str, Optional[float]] = {}
-    for metric in ["consistency", "completeness", "coherence", "fluency", "coverage"]:
-        column = f"judge_{metric}"
-        if column in df and df[column].notna().any():
-            mean_value = df[column].mean()
-            judge_means[metric] = round(float(mean_value), 3) if pd.notna(mean_value) else None
-        else:
-            judge_means[metric] = None
+    judge_scores_summary = {
+        metric: (round(float(value), 3) if pd.notna(value) else None)
+        for metric, value in {
+            **{m: judge_ai_means.get(m) for m in judge_metrics},
+            "coverage": avg_cov,
+        }.items()
+    }
+    judge_baseline_summary = {
+        metric: (round(float(value), 3) if pd.notna(value) else None)
+        for metric, value in {
+            **{m: judge_baseline_means.get(m) for m in judge_metrics},
+            "coverage": baseline_cov,
+        }.items()
+    }
+    judge_delta_summary = {
+        metric: (round(float(value), 3) if pd.notna(value) else None)
+        for metric, value in {
+            **{m: judge_delta_means.get(m) for m in judge_metrics},
+            "coverage": delta_cov,
+        }.items()
+    }
     sumac_flag_count = int(
         sum(len(flags or []) for flags in df["summac_flags"] if isinstance(flags, list))
     )
@@ -238,11 +292,15 @@ def render_overview(df: pd.DataFrame) -> None:
             "threshold": summac_cfg.min_overall,
             "flagged_sections": sumac_flag_count,
         },
-        "judge_scores": judge_means,
+        "judge_scores": judge_scores_summary,
+        "judge_baseline": judge_baseline_summary,
+        "judge_deltas": judge_delta_summary,
         "issue_counts": issue_counts_payload,
         "coverage": {
             "available_rows": coverage_available,
-            "average_score": judge_means.get("coverage"),
+            "average_score": judge_scores_summary.get("coverage"),
+            "baseline": judge_baseline_summary.get("coverage"),
+            "delta": judge_delta_summary.get("coverage"),
         },
         "rouge": {
             "available_rows": rouge_available,
@@ -265,12 +323,21 @@ def render_overview(df: pd.DataFrame) -> None:
 
     bad_examples_summary = load_bad_examples_summary(BAD_EXAMPLES_PATH)
     if bad_examples_summary:
+        delta_text = ""
+        if (
+            bad_examples_summary.get("judge_delta_consistency") is not None
+            and bad_examples_summary.get("judge_baseline_consistency") is not None
+        ):
+            delta_text = (
+                f" (Δ {bad_examples_summary['judge_delta_consistency']:+.3f} vs gold "
+                f"{bad_examples_summary['judge_baseline_consistency']:.3f})"
+            )
         st.info(
             "Synthetic bad examples "
             f"({bad_examples_summary['rows']} rows): "
             f"ROUGE-L avg {bad_examples_summary['rouge_avg']}, "
             f"BERTScore F1 avg {bad_examples_summary['bertscore_avg']}, "
-            f"Judge consistency avg {bad_examples_summary['judge_consistency']}. "
+            f"Judge consistency avg {bad_examples_summary['judge_consistency']}{delta_text}. "
             f"Flags → ROUGE {bad_examples_summary['rouge_flags']}/{bad_examples_summary['rows']}, "
             f"BERTScore {bad_examples_summary['bertscore_flags']}/{bad_examples_summary['rows']}."
         )
@@ -308,9 +375,15 @@ def render_row_view(df: pd.DataFrame) -> None:
         "id",
         "summac_overall",
         "judge_consistency",
+        "judge_delta_consistency",
         "judge_completeness",
+        "judge_delta_completeness",
         "judge_coherence",
+        "judge_delta_coherence",
         "judge_fluency",
+        "judge_delta_fluency",
+        "judge_coverage",
+        "judge_delta_coverage",
         "bertscore_overall_f1",
         "rouge_overall_rougeL",
     ]
@@ -319,9 +392,15 @@ def render_row_view(df: pd.DataFrame) -> None:
         rename_map = {
             "summac_overall": "SummaC overall",
             "judge_consistency": "Judge consistency",
+            "judge_delta_consistency": "Δ Consistency",
             "judge_completeness": "Judge completeness",
+            "judge_delta_completeness": "Δ Completeness",
             "judge_coherence": "Judge coherence",
+            "judge_delta_coherence": "Δ Coherence",
             "judge_fluency": "Judge fluency",
+            "judge_delta_fluency": "Δ Fluency",
+            "judge_coverage": "Judge coverage",
+            "judge_delta_coverage": "Δ Coverage",
             "bertscore_overall_f1": "BERTScore F1",
             "rouge_overall_rougeL": "ROUGE-L",
         }
@@ -337,23 +416,34 @@ def render_row_view(df: pd.DataFrame) -> None:
     row = filtered[filtered["id"] == selected_id].iloc[0]
 
     st.markdown(f"### Row {selected_id}")
-    st.caption("SummaC and judge scores")
-    score_cols = st.columns(7)
-    metrics = [
-        ("Summac overall", row.get("summac_overall")),
-        ("Judge consistency", row.get("judge_consistency")),
-        ("Judge completeness", row.get("judge_completeness")),
-        ("Judge coherence", row.get("judge_coherence")),
-        ("Judge fluency", row.get("judge_fluency")),
-        ("BERTScore F1", row.get("bertscore_overall_f1")),
-        ("ROUGE rougeL", row.get("rouge_overall_rougeL")),
+    st.caption("SummaC, judge, and reference scores")
+    metric_specs = [
+        ("summac_overall", "SummaC overall", None),
+        ("judge_consistency", "Judge consistency", "consistency"),
+        ("judge_completeness", "Judge completeness", "completeness"),
+        ("judge_coherence", "Judge coherence", "coherence"),
+        ("judge_fluency", "Judge fluency", "fluency"),
+        ("judge_coverage", "Judge coverage", "coverage"),
+        ("bertscore_overall_f1", "BERTScore F1", None),
+        ("rouge_overall_rougeL", "ROUGE-L", None),
     ]
-    for col, (label, value) in zip(score_cols, metrics):
+    score_cols = st.columns(len(metric_specs))
+    for col, (column_name, label, judge_key) in zip(score_cols, metric_specs):
+        value = row.get(column_name)
         col.metric(label, f"{value:.3f}" if pd.notna(value) else "—")
-        key = label.lower().replace(" ", "_")
-        description = METRIC_DESCRIPTIONS.get(key)
+        description = METRIC_DESCRIPTIONS.get(column_name) or METRIC_DESCRIPTIONS.get(label.lower().replace(" ", "_"))
+        caption_parts: List[str] = []
+        if judge_key:
+            baseline_value = row.get(f"judge_baseline_{judge_key}")
+            delta_value = row.get(f"judge_delta_{judge_key}")
+            if pd.notna(baseline_value):
+                caption_parts.append(f"Gold {baseline_value:.3f}")
+            if pd.notna(delta_value):
+                caption_parts.append(f"Δ {delta_value:+.3f}")
         if description:
-            col.caption(description)
+            caption_parts.append(description)
+        if caption_parts:
+            col.caption("; ".join(caption_parts))
 
     st.caption("Text artefacts")
     with st.expander("Transcript", expanded=False):
@@ -385,7 +475,15 @@ def render_row_view(df: pd.DataFrame) -> None:
                 st.markdown(f"- **{category.replace('_', ' ').title()}**")
                 for item in filtered_items:
                     st.write(f"  - {item}")
+            baseline_scores = section_data.get("baseline_scores")
+            baseline_overall = section_data.get("baseline_overall")
+            delta_overall = section_data.get("delta_overall")
             summary = section_data.get("summary")
+            if baseline_scores:
+                st.markdown("**Gold baseline**")
+                st.write({"overall": baseline_overall, **baseline_scores})
+            if delta_overall is not None:
+                st.caption(f"Δ overall {delta_overall:+.3f}")
             if summary:
                 st.caption(summary)
 

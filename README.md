@@ -85,6 +85,15 @@ Outputs
 - Dashboard config expects scored files under `data/augmented/`.
 - To backfill new metrics onto an existing scored file without recomputing others, load the JSONL, call the target metric functions (e.g., ROUGE, BERTScore), and rewrite the updated rows in place.
 
+Backfill Judge Baselines
+------------------------
+Use the helper script to refresh existing scored files so the LLM judge stores gold-note baselines and AI–gold deltas:
+```
+uv run python scripts/backfill_judge_baseline.py --input data/augmented/train_scored.jsonl
+uv run python scripts/backfill_judge_baseline.py --input data/augmented/bad_examples_scored.jsonl
+```
+When `--output` is omitted the script rewrites the input file in place; only the `llm_judge` payload is updated.
+
 Dashboard & Reporting
 ---------------------
 Launch the Streamlit dashboard against any scored file:
@@ -102,7 +111,7 @@ Metrics Cheat Sheet
 - **SummaC (threshold 0.45)** – fast transcript vs. AI gate; below-threshold rows suggest hallucination risk or missing transcript coverage.
 - **ROUGE-L (flag < 0.2)** – low lexical overlap with the gold note; often signals omitted sections or entirely different content.
 - **BERTScore F1 (flag < 0.3)** – low semantic similarity to the gold note; catches paraphrased omissions that ROUGE might miss.
-- **LLM Judge** – richest signal: factuality, completeness, coherence, fluency, issues, and gold-note coverage.
+- **LLM Judge** – richest signal: factuality, completeness, coherence, fluency, issues, and gold-note coverage. Each row stores the clinician baseline (treated as the 5/5 reference) and the AI−gold delta so you can see how far the generated note trails the gold note.
 
 Evaluator Quality & Synthetic Data
 ----------------------------------
