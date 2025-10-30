@@ -115,7 +115,7 @@ Metrics Cheat Sheet
 - **BERTScore F1 (flag < 0.3)** – low semantic similarity to the gold note; catches paraphrased omissions that ROUGE might miss.
 - **LLM Judge** – richest signal: factuality, completeness, coherence, fluency, issues, and gold-note coverage. Each row stores the clinician baseline (treated as the 5/5 reference) and the AI−gold delta so you can see how far the generated note trails the gold note.
 
-Why these metrics (plain speak)
+Why these metrics
 -------------------------------
 - **ROUGE + BERTScore first.** These aren’t perfect evaluators, but they are cheap alerts. I run them first to catch “something is very wrong” cases (bad generation, wrong prompt, API glitch) before burning LLM credits. ROUGE handles lexical overlap, BERTScore covers semantics.
 - **SummaC on the transcript, then on the gold.** SummaC-ZS is lightweight compared to bigger NLI rigs like UniEval. I run it against the transcript to smoke-test hallucinations—yes, the format mismatch keeps scores lower, but I only care about relative changes. Then I run SummaC against the gold note (`summac_gold.jsonl`) to see how far the AI drifted from the clinician edit.
