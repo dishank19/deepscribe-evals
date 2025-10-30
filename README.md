@@ -3,6 +3,10 @@ DeepScribe SOAP Evaluation Suite
 
 Quick-start guide for building the augmented dataset, running the evaluation metrics, and inspecting results.
 
+GitHub repo: [dishank19/deepscribe-evals](https://github.com/dishank19/deepscribe-evals).
+I treat the SOAP note in the OMI dataset as the ground-truth clinician-edited note. The AI soap is generated from the transcript.  
+ALso i refer to the ground truth clinic as gold note/soap in the readme.
+
 Environment Setup
 -----------------
 - Install dependencies once with `uv sync`.
@@ -11,12 +15,16 @@ Environment Setup
 
 Data Processing Pipeline
 ------------------------
-1. **Source transcripts & gold notes.** We pull rows from `omi-health/medical-dialogue-to-soap-summary` via `datasets`. The split and slice are controlled by `scripts/build_dataset.py`.
-2. **Gold SOAP parsing.** `evalsuite/dataset.py::parse_soap` normalises the labelled blocks (`S/O/A/P`) into structured dictionaries, preserving multi-line content.
-3. **AI SOAP generation.** `evalsuite/gen/pydantic_claude.py` streams each transcript through a Pydantic-AI agent (Claude backend) that returns schema-validated SOAP sections. Generation retries are handled inside the agent wrapper so malformed responses never hit disk.
-4. **Augmented dataset write.** `scripts/build_dataset.py` emits JSONL files under `data/augmented/<split>.jsonl` containing `transcript`, `gold_soap`, `ai_soap`, and an empty `metrics` stub. By default we cap at 100 rows (`--limit 100`) to keep iteration fast; drop the flag to cover the full split.
-5. **Synthetic stress set.** `data/augmented/bad_examples.jsonl` holds five transcripts that were not part of the first 100 rows. Their AI SOAP sections are intentionally degraded (empty sections, hallucinated facts, etc.) so we can sanity-check the evaluator on obviously bad output. Generate it with `scripts/create_bad_examples.py`.
-> Assumption: The SOAP note that ships with the OMI dataset is already the clinician-edited gold reference. We treat it as such and only generate the AI SOAP ourselves.
+1. **Source transcripts & gold notes.** I have pulled rows from `omi-health/medical-dialogue-to-soap-summary` via `datasets`. The split and slice are controlled by `scripts/build_dataset.py`.
+
+2. **Gold SOAP parsing.** `evalsuite/dataset.py::parse_soap` normalises the labelled blocks (`S/O/A/P`) into structured dictionaries.
+
+3. **AI SOAP generation.** `evalsuite/gen/pydantic_claude.py` streams each transcript through a Pydantic-AI agent that returns schema-validated SOAP sections. Generation retries are handled inside the agent wrapper to basically make sure its json responses all the time
+
+4. **Augmented dataset write.** `scripts/build_dataset.py` gives a JSONL file under `data/augmented/<split>.jsonl` containing `transcript`, `gold_soap`, `ai_soap`, and an empty `metrics` stub. By default its capped at 100 rows (`--limit 100`).
+
+5. **Synthetic stress set.** `data/augmented/bad_examples.jsonl` holds five transcripts that are not part of the first 100 rows. Their AI SOAP sections are intentionally degraded (empty sections, hallucinated facts, etc.) to sanity-check the evaluator on obviously bad output. Generate it with `scripts/create_bad_examples.py`.
+
 
 Common dataset operations:
 ```
@@ -36,6 +44,13 @@ uv run python -m evalsuite.runners.run_batch \
   --output data/augmented/bad_examples_scored.jsonl
 ```
 > The synthetic command above reuses the build script with an offset and a helper that overwrites the AI SOAP with deliberately poor content. See the “Evaluator Quality & Synthetic Data” section for usage details.
+
+Dataset files in this repo:
+- `data/augmented/train.jsonl` – transcripts + gold SOAP + AI SOAP (first 100 rows by default).
+- `data/augmented/train_scored.jsonl` – `train.jsonl` with metrics populated.
+- `data/augmented/bad_examples.jsonl` – the intentionally bad synthetic subset.
+- `data/augmented/bad_examples_scored.jsonl` – metrics for the synthetic subset.
+- `data/augmented/summac_gold.jsonl` – SummaC scores comparing AI SOAP to the gold SOAP.
 
 Evaluation Metrics & Code Layout
 --------------------------------
