@@ -41,6 +41,10 @@ METRIC_DESCRIPTIONS = {
     "judge_coherence": "0–5: logical SOAP organisation and readability.",
     "judge_fluency": "0–5: clarity and professional tone.",
     "judge_coverage": "0–5: when a clinician gold note is available, this reflects overlap with it.",
+    "bertscore_overall_f1": "0–1: semantic similarity between the AI and gold SOAP using BERTScore F1.",
+    "rouge_overall_rougeL": "0–1: ROUGE-L overlap between the AI and gold SOAP (lexical coverage).",
+    "bertscore_f1": "0–1: semantic similarity between AI and gold SOAP using BERTScore F1.",
+    "rouge_rougel": "0–1: ROUGE-L lexical overlap between AI and gold SOAP.",
 }
 
 OVERVIEW_SYSTEM_PROMPT = """
@@ -98,6 +102,8 @@ def load_dataset(path: Path) -> pd.DataFrame:
                 "judge_scores": metrics.get("llm_judge", {}).get("scores", {}),
                 "judge_sections": metrics.get("llm_judge", {}).get("sections", {}),
                 "judge_issues": metrics.get("llm_judge", {}).get("issues", {}),
+                "rouge_scores": metrics.get("rouge", {}).get("scores", {}),
+                "bertscore_scores": metrics.get("bertscore", {}).get("scores", {}),
             }
             rows.append(row)
     df = pd.DataFrame(rows)
@@ -107,6 +113,18 @@ def load_dataset(path: Path) -> pd.DataFrame:
             df[f"judge_{metric}"] = df["judge_scores"].apply(
                 lambda scores: scores.get(metric) if isinstance(scores, dict) else None
             )
+        df["rouge_overall_rougeL"] = df["rouge_scores"].apply(
+            lambda scores: scores.get("overall_rougeL") if isinstance(scores, dict) else None
+        )
+        df["bertscore_overall_f1"] = df["bertscore_scores"].apply(
+            lambda scores: scores.get("overall_f1") if isinstance(scores, dict) else None
+        )
+        df["rouge_flag"] = df["rouge_overall_rougeL"].apply(
+            lambda value: value is not None and value < 0.2
+        )
+        df["bertscore_flag"] = df["bertscore_overall_f1"].apply(
+            lambda value: value is not None and value < 0.3
+        )
     return df
 
 
@@ -132,6 +150,22 @@ def render_overview(df: pd.DataFrame) -> None:
             st.metric("Coverage vs. gold", f"{avg_cov:.3f}" if pd.notna(avg_cov) else "—")
         else:
             st.metric("Coverage vs. gold", "—")
+
+    extra_cards = st.columns(2)
+    bert_series = pd.to_numeric(df["bertscore_overall_f1"], errors="coerce")
+    rouge_series = pd.to_numeric(df["rouge_overall_rougeL"], errors="coerce")
+    with extra_cards[0]:
+        avg_bertscore = bert_series.mean()
+        st.metric(
+            "BERTScore F1",
+            f"{avg_bertscore:.3f}" if pd.notna(avg_bertscore) else "—",
+        )
+    with extra_cards[1]:
+        avg_rouge = rouge_series.mean()
+        st.metric(
+            "ROUGE-L",
+            f"{avg_rouge:.3f}" if pd.notna(avg_rouge) else "—",
+        )
 
     with st.expander("What do these metrics mean?", expanded=False):
         st.markdown(f"- **SummaC overall** – {METRIC_DESCRIPTIONS['summac_overall']}")
@@ -171,6 +205,9 @@ def render_overview(df: pd.DataFrame) -> None:
     }
     coverage_available = int(df["gold_soap"].apply(lambda x: bool(x)).sum())
 
+    rouge_available = int(rouge_series.notna().sum())
+    bert_available = int(bert_series.notna().sum())
+
     summary_context = {
         "rows": n_rows,
         "sumac": {
@@ -184,6 +221,18 @@ def render_overview(df: pd.DataFrame) -> None:
         "coverage": {
             "available_rows": coverage_available,
             "average_score": judge_means.get("coverage"),
+        },
+        "rouge": {
+            "available_rows": rouge_available,
+            "average_rougeL": round(rouge_series.mean(), 3)
+            if rouge_series.notna().any()
+            else None,
+        },
+        "bertscore": {
+            "available_rows": bert_available,
+            "average_f1": round(bert_series.mean(), 3)
+            if bert_series.notna().any()
+            else None,
         },
     }
 
@@ -206,24 +255,43 @@ def render_overview(df: pd.DataFrame) -> None:
 
 def render_row_view(df: pd.DataFrame) -> None:
     st.subheader("Row explorer")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         min_sumac = st.slider("Min SummaC overall", 0.0, 1.0, 0.0, 0.05)
     with col2:
         min_consistency = st.slider("Min judge consistency", 0.0, 5.0, 0.0, 0.25)
+    with col3:
+        show_only_flags = st.checkbox("Show only flagged rows (low ROUGE/BERTScore)", value=False)
 
     filtered = df[
         df["summac_overall"].fillna(0) >= min_sumac
     ]
     filtered = filtered[filtered["judge_consistency"].fillna(0) >= min_consistency]
+    if show_only_flags:
+        filtered = filtered[(filtered["rouge_flag"] == True) | (filtered["bertscore_flag"] == True)]
 
-    display_cols = ["id", "summac_overall", "judge_consistency", "judge_completeness", "judge_coherence", "judge_fluency"]
+    display_cols = [
+        "id",
+        "summac_overall",
+        "judge_consistency",
+        "judge_completeness",
+        "judge_coherence",
+        "judge_fluency",
+        "bertscore_overall_f1",
+        "rouge_overall_rougeL",
+    ]
     if not filtered.empty:
         table = filtered[display_cols]
-        st.dataframe(
-            table.rename(columns=lambda c: c.replace("judge_", "Judge ").replace("_", " ").title()),
-            width="stretch",
-        )
+        rename_map = {
+            "summac_overall": "SummaC overall",
+            "judge_consistency": "Judge consistency",
+            "judge_completeness": "Judge completeness",
+            "judge_coherence": "Judge coherence",
+            "judge_fluency": "Judge fluency",
+            "bertscore_overall_f1": "BERTScore F1",
+            "rouge_overall_rougeL": "ROUGE-L",
+        }
+        st.dataframe(table.rename(columns=rename_map), width="stretch")
     else:
         st.dataframe(pd.DataFrame(columns=display_cols), width="stretch")
 
@@ -236,13 +304,15 @@ def render_row_view(df: pd.DataFrame) -> None:
 
     st.markdown(f"### Row {selected_id}")
     st.caption("SummaC and judge scores")
-    score_cols = st.columns(5)
+    score_cols = st.columns(7)
     metrics = [
         ("Summac overall", row.get("summac_overall")),
         ("Judge consistency", row.get("judge_consistency")),
         ("Judge completeness", row.get("judge_completeness")),
         ("Judge coherence", row.get("judge_coherence")),
         ("Judge fluency", row.get("judge_fluency")),
+        ("BERTScore F1", row.get("bertscore_overall_f1")),
+        ("ROUGE rougeL", row.get("rouge_overall_rougeL")),
     ]
     for col, (label, value) in zip(score_cols, metrics):
         col.metric(label, f"{value:.3f}" if pd.notna(value) else "—")

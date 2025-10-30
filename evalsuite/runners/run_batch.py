@@ -11,7 +11,7 @@ from typing import Iterable, Iterator, List
 from tqdm import tqdm
 
 from evalsuite.dataset import read_jsonl, write_jsonl
-from evalsuite.metrics import llm_judge, summac_eval  # noqa: F401 - ensure registration
+from evalsuite.metrics import bert_score_eval, llm_judge, rouge_eval, summac_eval  # noqa: F401 - ensure registration
 from evalsuite.metrics.registry import get_metric
 
 

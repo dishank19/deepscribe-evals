@@ -15,4 +15,6 @@ dependencies = [
     "pydantic-evals>=1.8.0",
     "python-dotenv>=1.0.1",
     "tqdm>=4.66.0",
+    "bert-score>=0.3.13",
+    "rouge-score>=0.1.2",
 ]

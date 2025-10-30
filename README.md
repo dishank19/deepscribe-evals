@@ -32,12 +32,12 @@ Evaluate any chunk of the augmented dataset.
 ```
 uv run python -m evalsuite.runners.run_batch \
   --split train \
-  --metrics summac,llm_judge \
+  --metrics summac,rouge,bertscore,llm_judge \
   --output data/augmented/train_scored.jsonl
 ```
 Key arguments:
 - `--split`: which augmented file to read (looks under `data/augmented/<split>.jsonl`).
-- `--metrics`: comma-separated registry names (`summac`, `llm_judge`).
+- `--metrics`: comma-separated registry names (`summac`, `rouge`, `bertscore`, `llm_judge`, …).
 - `--start`, `--limit`: optional slice controls for chunked execution.
 - `--output`: destination file. Use `.jsonl` for newline-delimited records or `.json` for a single array.
 - `--append`: only valid with `.jsonl`; appends new results instead of overwriting.
@@ -48,7 +48,7 @@ Re-run metrics for a specific record id (0-indexed when generated locally):
 uv run python -m evalsuite.runners.run_one \
   --id 42 \
   --split train \
-  --metrics summac,llm_judge \
+  --metrics summac,rouge,bertscore,llm_judge \
   --output data/augmented/single_row.json
 ```
 Omit `--output` to print the evaluated record to stdout (gold SOAP is hidden by default).
@@ -66,6 +66,7 @@ Outputs
 - Generated dataset: `data/augmented/<split>.jsonl`
 - Scored outputs: `data/augmented/<split>_scored.jsonl` (or `.json`)
 - Dashboard config expects scored files under `data/augmented/`.
+- To backfill new metrics onto an existing scored file without recomputing others, load the JSONL, call the target metric functions (e.g., ROUGE, BERTScore), and rewrite the updated rows in place.
 
 Next Steps
 ----------

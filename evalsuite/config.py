@@ -34,8 +34,27 @@ class JudgeConfig:
     timeout_seconds: float = 240.0
 
 
+@dataclass(frozen=True)
+class RougeConfig:
+    """Settings for ROUGE comparisons between AI and gold notes."""
+
+    metrics: tuple[str, ...] = ("rougeL",)
+    use_stemmer: bool = True
+
+
+@dataclass(frozen=True)
+class BertScoreConfig:
+    """Settings for BERTScore comparisons between AI and gold notes."""
+
+    model_type: str = "roberta-large"
+    lang: str = "en"
+    rescale_with_baseline: bool = True
+
+
 paths = Paths()
 summac = SummaCConfig()
 judge = JudgeConfig()
+rouge = RougeConfig()
+bertscore = BertScoreConfig()
 
 DEFAULT_BUILD_LIMIT = 100

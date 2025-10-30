@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from evalsuite.dataset import find_row, write_jsonl
-from evalsuite.metrics import llm_judge, summac_eval  # noqa: F401 - ensure registration
+from evalsuite.metrics import bert_score_eval, llm_judge, rouge_eval, summac_eval  # noqa: F401 - ensure registration
 from evalsuite.metrics.registry import get_metric
 
 
