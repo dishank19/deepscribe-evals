@@ -17,4 +17,5 @@ dependencies = [
     "tqdm>=4.66.0",
     "bert-score>=0.3.13",
     "rouge-score>=0.1.2",
+    "streamlit>=1.51.0",
 ]

@@ -19,7 +19,7 @@ class SummaCConfig:
 
     model_name: str = "mnli-base"
     granularity: str = "sentence"
-    min_overall: float = 0.6
+    min_overall: float = 0.45
     min_section: float = 0.55
 
 
