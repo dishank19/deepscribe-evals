@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.env
+.venv/
+
+# Project-specific caches
+.cache/
+.cache*/
+*.cache
+
+# Data outputs
+/data/augmented/*.jsonl
+/data/augmented/*.parquet
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
