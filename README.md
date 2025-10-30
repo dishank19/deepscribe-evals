@@ -85,15 +85,6 @@ Outputs
 - Dashboard config expects scored files under `data/augmented/`.
 - To backfill new metrics onto an existing scored file without recomputing others, load the JSONL, call the target metric functions (e.g., ROUGE, BERTScore), and rewrite the updated rows in place.
 
-Backfill Judge Baselines
-------------------------
-Use the helper script to refresh existing scored files so the LLM judge stores gold-note baselines and AI–gold deltas:
-```
-uv run python scripts/backfill_judge_baseline.py --input data/augmented/train_scored.jsonl
-uv run python scripts/backfill_judge_baseline.py --input data/augmented/bad_examples_scored.jsonl
-```
-When `--output` is omitted the script rewrites the input file in place; only the `llm_judge` payload is updated.
-
 SummaC vs Gold Note
 -------------------
 Grab the transcript-vs-gold SummaC scores so you can eyeball how far the AI deviates from the clinician note:
