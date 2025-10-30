@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 
 import anyio
 from pydantic import BaseModel, Field, ValidationError
-from pydantic_ai import Agent
+from pydantic_ai import Agent, exceptions
 from pydantic_ai.models import ModelSettings
 from pydantic_evals.evaluators.llm_as_a_judge import (
     judge_input_output,
@@ -128,13 +128,13 @@ def _model_name() -> str:
     model = judge_config.model
     if ":" in model:
         return model
-    provider = "openai" if model.startswith("gpt") else "anthropic"
-    return f"{provider}:{model}"
+    return f"cerebras:{model}"
 
 
 @lru_cache(maxsize=1)
 def _model_settings() -> Optional[ModelSettings]:
-    if _model_name().startswith("openai:"):
+    prefix = _model_name().split(":", 1)[0]
+    if prefix in {"openai", "cerebras"}:
         return ModelSettings(response_format={"type": "json_object"})
     return None
 
@@ -178,7 +178,7 @@ async def _score_section(section: str, transcript: str, ai_text: str) -> Section
             summary="Section contained no content to evaluate.",
         )
 
-    for attempt in range(judge_config.max_retries):
+    for _ in range(judge_config.max_retries):
         try:
             grading = await judge_input_output(
                 inputs=f"Transcript:\n{transcript.strip()}",
@@ -193,11 +193,18 @@ async def _score_section(section: str, transcript: str, ai_text: str) -> Section
         except ValidationError:
             break
         except Exception:
-            await asyncio.sleep(1.5 * (attempt + 1))
+            break
 
     prompt = SECTION_TEMPLATE.format(transcript=transcript.strip(), section_name=SECTION_NAMES[section], ai_section=ai_text)
-    fallback = await _section_agent().run(prompt, model_settings=_model_settings())
-    return _clamp_sections(fallback.output)
+    try:
+        fallback = await _section_agent().run(prompt, model_settings=_model_settings())
+        return _clamp_sections(fallback.output)
+    except Exception:
+        return SectionEvaluation(
+            scores=SectionScores(consistency=0.0, completeness=0.0, coherence=0.0, fluency=0.0),
+            issues=SectionIssues(missing=["Judge fallback failed"], unsupported=[], clinical_errors=[]),
+            summary="Judge fallback failed",
+        )
 
 
 async def _score_coverage(section: str, transcript: str, ai_text: str, reference: str) -> CoverageEvaluation:
@@ -205,7 +212,7 @@ async def _score_coverage(section: str, transcript: str, ai_text: str, reference
     if not reference:
         return CoverageEvaluation(coverage_score=0.0, summary=None)
 
-    for attempt in range(judge_config.max_retries):
+    for _ in range(judge_config.max_retries):
         try:
             grading = await judge_input_output_expected(
                 inputs=f"Transcript:\n{transcript.strip()}",
@@ -223,7 +230,7 @@ async def _score_coverage(section: str, transcript: str, ai_text: str, reference
         except ValidationError:
             break
         except Exception:
-            await asyncio.sleep(1.5 * (attempt + 1))
+            break
 
     prompt = COVERAGE_TEMPLATE.format(
         transcript=transcript.strip(),
@@ -231,10 +238,13 @@ async def _score_coverage(section: str, transcript: str, ai_text: str, reference
         reference_section=reference,
         ai_section=ai_text.strip(),
     )
-    fallback = await _coverage_agent().run(prompt, model_settings=_model_settings())
-    coverage = fallback.output
-    coverage.coverage_score = _clamp_coverage(coverage.coverage_score)
-    return coverage
+    try:
+        fallback = await _coverage_agent().run(prompt, model_settings=_model_settings())
+        coverage = fallback.output
+        coverage.coverage_score = _clamp_coverage(coverage.coverage_score)
+        return coverage
+    except Exception:
+        return CoverageEvaluation(coverage_score=0.0, summary="Coverage fallback failed")
 
 
 def _average(per_section: Dict[str, SectionEvaluation], metric: str) -> float:

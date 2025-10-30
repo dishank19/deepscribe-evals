@@ -27,7 +27,7 @@ class SummaCConfig:
 class JudgeConfig:
     """Settings for the LLM-as-a-judge pipeline."""
 
-    model: str = "gpt-5-mini-2025-08-07"
+    model: str = "cerebras:gpt-oss-120b"
     prompt_version: str = "v0"
     enable_section_cache: bool = True
     max_retries: int = 3
