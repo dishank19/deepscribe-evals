@@ -27,6 +27,12 @@ uv run python view_dataset.py --split train --index 0
 
 # Create the synthetic “bad” sample set (uses rows beyond the first 100)
 uv run python scripts/create_bad_examples.py
+
+# Score the synthetic rows with the full metric stack
+uv run python -m evalsuite.runners.run_batch \
+  --split bad_examples \
+  --metrics summac,rouge,bertscore,llm_judge \
+  --output data/augmented/bad_examples_scored.jsonl
 ```
 > The synthetic command above reuses the build script with an offset and a helper that overwrites the AI SOAP with deliberately poor content. See the “Evaluator Quality & Synthetic Data” section for usage details.
 

@@ -27,6 +27,7 @@ SECTION_NAMES = {"S": "Subjective", "O": "Objective", "A": "Assessment", "P": "P
 
 DATA_DIR = Path("data/augmented")
 DEFAULT_PATTERN = "*scored*.jsonl"
+BAD_EXAMPLES_PATH = DATA_DIR / "bad_examples_scored.jsonl"
 
 FALLBACK_ISSUE_MARKERS = {"Judge fallback failed", "Judge fallback failed (504)"}
 
@@ -126,6 +127,27 @@ def load_dataset(path: Path) -> pd.DataFrame:
             lambda value: value is not None and value < 0.3
         )
     return df
+
+
+@st.cache_data(show_spinner=False)
+def load_bad_examples_summary(path: Path) -> Optional[Dict[str, float]]:
+    if not path.exists():
+        return None
+    df = load_dataset(path)
+    if df.empty:
+        return None
+    rouge_series = pd.to_numeric(df["rouge_overall_rougeL"], errors="coerce")
+    bert_series = pd.to_numeric(df["bertscore_overall_f1"], errors="coerce")
+    judge_series = pd.to_numeric(df["judge_consistency"], errors="coerce")
+    summary = {
+        "rows": len(df),
+        "rouge_avg": round(rouge_series.mean(), 3) if rouge_series.notna().any() else None,
+        "bertscore_avg": round(bert_series.mean(), 3) if bert_series.notna().any() else None,
+        "judge_consistency": round(judge_series.mean(), 3) if judge_series.notna().any() else None,
+        "rouge_flags": int(df["rouge_flag"].fillna(False).sum()) if "rouge_flag" in df else 0,
+        "bertscore_flags": int(df["bertscore_flag"].fillna(False).sum()) if "bertscore_flag" in df else 0,
+    }
+    return summary
 
 
 def render_overview(df: pd.DataFrame) -> None:
@@ -240,6 +262,18 @@ def render_overview(df: pd.DataFrame) -> None:
     st.divider()
     st.subheader("LLM overview")
     st.write(summary_text)
+
+    bad_examples_summary = load_bad_examples_summary(BAD_EXAMPLES_PATH)
+    if bad_examples_summary:
+        st.info(
+            "Synthetic bad examples "
+            f"({bad_examples_summary['rows']} rows): "
+            f"ROUGE-L avg {bad_examples_summary['rouge_avg']}, "
+            f"BERTScore F1 avg {bad_examples_summary['bertscore_avg']}, "
+            f"Judge consistency avg {bad_examples_summary['judge_consistency']}. "
+            f"Flags → ROUGE {bad_examples_summary['rouge_flags']}/{bad_examples_summary['rows']}, "
+            f"BERTScore {bad_examples_summary['bertscore_flags']}/{bad_examples_summary['rows']}."
+        )
 
     with st.expander("Frequent judge findings", expanded=False):
         cols = st.columns(3)
