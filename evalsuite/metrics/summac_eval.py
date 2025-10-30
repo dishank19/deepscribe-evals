@@ -62,3 +62,22 @@ def run_summac(transcript: str, ai_soap: Dict[str, str]) -> Dict[str, Dict[str, 
 
 
 register("summac", run_summac)
+
+
+def run_summac_against_reference(
+    reference_soap: Dict[str, str],
+    candidate_soap: Dict[str, str],
+) -> Dict[str, Dict[str, float]]:
+    """Compute SummaC scores using the gold SOAP as the source text."""
+
+    model = _summac_model()
+    section_scores = {
+        section: _score_section(model, reference_soap.get(section, ""), candidate_soap.get(section, ""))
+        for section in SECTION_KEYS
+    }
+    overall = sum(section_scores.values()) / len(SECTION_KEYS)
+
+    scores = {"overall": round(overall, 3)}
+    scores.update({f"{section}_consistency": round(value, 3) for section, value in section_scores.items()})
+
+    return {"scores": scores}

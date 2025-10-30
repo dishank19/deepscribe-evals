@@ -25,7 +25,7 @@ You are an experienced clinical documentation specialist.
 - Read the provided patient encounter transcript carefully.
 - Extract only information stated or implied in the transcript; do not invent facts.
 - Write a SOAP note with four sections: S, O, A, P.
-- Each section should be well-structured prose suitable for a clinician.
+- Each section should be well-structured prose suitable for a clinician. Avoid generic phrasing; be precise and capture clinically relevant detail.
 - Return JSON that exactly matches the provided schema.
 - Every key (S, O, A, P) must be present even if no findings are noted.
 """

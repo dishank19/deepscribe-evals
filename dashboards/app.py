@@ -28,14 +28,17 @@ SECTION_NAMES = {"S": "Subjective", "O": "Objective", "A": "Assessment", "P": "P
 DATA_DIR = Path("data/augmented")
 DEFAULT_PATTERN = "*scored*.jsonl"
 BAD_EXAMPLES_PATH = DATA_DIR / "bad_examples_scored.jsonl"
+SUMMAC_GOLD_PATH = DATA_DIR / "summac_gold.jsonl"
 
 FALLBACK_ISSUE_MARKERS = {"Judge fallback failed", "Judge fallback failed (504)"}
 
 METRIC_DESCRIPTIONS = {
     "summac_overall": (
-        "SummaC is a factual consistency score based on Natural Language Inference. "
-        "It estimates how well each SOAP section is supported by the transcript. "
-        "Scores close to 1.0 indicate strong grounding; lower scores point to missing or hallucinatory content."
+        "SummaC (transcript) checks whether the AI SOAP is supported by the encounter transcript. "
+        "Scores close to 1.0 mean the note sticks to what was said; low scores flag potential hallucinations."
+    ),
+    "sumac_gold_overall": (
+        "SummaC (gold) compares the AI SOAP to the clinician-edited gold note, giving a feel for how closely the AI matched the reference write-up."
     ),
     "judge_consistency": "0–5: factual alignment between the AI SOAP section and the transcript.",
     "judge_completeness": "0–5: coverage of clinically important facts from the transcript.",
@@ -137,7 +140,29 @@ def load_dataset(path: Path) -> pd.DataFrame:
         df["bertscore_flag"] = df["bertscore_overall_f1"].apply(
             lambda value: value is not None and value < 0.3
         )
+
+        sumac_gold_mapping = load_sumac_gold(SUMMAC_GOLD_PATH)
+        if sumac_gold_mapping:
+            df["sumac_gold_overall"] = df["id"].astype(str).apply(
+                lambda rid: sumac_gold_mapping.get(rid, {}).get("overall")
+            )
+            for section in SECTION_KEYS:
+                df[f"sumac_gold_{section}"] = df["id"].astype(str).apply(
+                    lambda rid: sumac_gold_mapping.get(rid, {}).get(f"{section}_consistency")
+                )
     return df
+
+
+@st.cache_data(show_spinner=False)
+def load_sumac_gold(path: Path) -> Dict[str, Dict[str, float]]:
+    if not path.exists():
+        return {}
+    mapping: Dict[str, Dict[str, float]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = json.loads(line)
+            mapping[str(raw.get("id"))] = raw.get("sumac_gold", {})
+    return mapping
 
 
 @st.cache_data(show_spinner=False)
@@ -168,26 +193,31 @@ def load_bad_examples_summary(path: Path) -> Optional[Dict[str, float]]:
 def render_overview(df: pd.DataFrame) -> None:
     st.subheader("Aggregated metrics")
     n_rows = len(df)
-    primary_cards = st.columns(4)
+    primary_cards = st.columns(5)
 
     sumac_series = pd.to_numeric(df["summac_overall"], errors="coerce")
     avg_sumac = sumac_series.mean()
     below = sumac_series.lt(summac_cfg.min_overall).sum() if not sumac_series.empty else 0
     with primary_cards[0]:
         st.metric(
-            "SummaC overall",
+            "SummaC (transcript)",
             f"{avg_sumac:.3f}" if pd.notna(avg_sumac) else "—",
             f"{below}/{n_rows} below {summac_cfg.min_overall}",
         )
 
+    sumac_gold_series = pd.to_numeric(df.get("sumac_gold_overall"), errors="coerce")
+    avg_sumac_gold = sumac_gold_series.mean()
+    with primary_cards[1]:
+        st.metric("SummaC (gold)", f"{avg_sumac_gold:.3f}" if pd.notna(avg_sumac_gold) else "—")
+
     bert_series = pd.to_numeric(df["bertscore_overall_f1"], errors="coerce")
     avg_bertscore = bert_series.mean()
-    with primary_cards[1]:
+    with primary_cards[2]:
         st.metric("BERTScore F1", f"{avg_bertscore:.3f}" if pd.notna(avg_bertscore) else "—")
 
     rouge_series = pd.to_numeric(df["rouge_overall_rougeL"], errors="coerce")
     avg_rouge = rouge_series.mean()
-    with primary_cards[2]:
+    with primary_cards[3]:
         st.metric("ROUGE-L", f"{avg_rouge:.3f}" if pd.notna(avg_rouge) else "—")
 
     coverage_series = pd.to_numeric(df["judge_coverage"], errors="coerce") if "judge_coverage" in df else pd.Series(dtype=float)
@@ -200,7 +230,7 @@ def render_overview(df: pd.DataFrame) -> None:
             coverage_delta_text = f"{delta_cov:+.3f} vs gold {baseline_cov:.3f}"
         else:
             coverage_delta_text = f"{delta_cov:+.3f}"
-    with primary_cards[3]:
+    with primary_cards[4]:
         st.metric(
             "Judge coverage",
             f"{avg_cov:.3f}" if pd.notna(avg_cov) else "—",
@@ -292,6 +322,9 @@ def render_overview(df: pd.DataFrame) -> None:
             "threshold": summac_cfg.min_overall,
             "flagged_sections": sumac_flag_count,
         },
+        "sumac_gold": {
+            "average": round(avg_sumac_gold, 3) if pd.notna(avg_sumac_gold) else None,
+        },
         "judge_scores": judge_scores_summary,
         "judge_baseline": judge_baseline_summary,
         "judge_deltas": judge_delta_summary,
@@ -374,6 +407,7 @@ def render_row_view(df: pd.DataFrame) -> None:
     display_cols = [
         "id",
         "summac_overall",
+        "sumac_gold_overall",
         "judge_consistency",
         "judge_delta_consistency",
         "judge_completeness",
@@ -390,7 +424,8 @@ def render_row_view(df: pd.DataFrame) -> None:
     if not filtered.empty:
         table = filtered[display_cols]
         rename_map = {
-            "summac_overall": "SummaC overall",
+            "summac_overall": "SummaC (transcript)",
+            "sumac_gold_overall": "SummaC (gold)",
             "judge_consistency": "Judge consistency",
             "judge_delta_consistency": "Δ Consistency",
             "judge_completeness": "Judge completeness",
@@ -418,7 +453,8 @@ def render_row_view(df: pd.DataFrame) -> None:
     st.markdown(f"### Row {selected_id}")
     st.caption("SummaC, judge, and reference scores")
     metric_specs = [
-        ("summac_overall", "SummaC overall", None),
+        ("summac_overall", "SummaC (transcript)", None),
+        ("sumac_gold_overall", "SummaC (gold)", None),
         ("judge_consistency", "Judge consistency", "consistency"),
         ("judge_completeness", "Judge completeness", "completeness"),
         ("judge_coherence", "Judge coherence", "coherence"),

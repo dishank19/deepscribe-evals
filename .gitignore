@@ -10,10 +10,6 @@ __pycache__/
 .cache*/
 *.cache
 
-# Data outputs
-/data/augmented/*.jsonl
-/data/augmented/*.parquet
-
 # OS/Editor
 .DS_Store
 .idea/

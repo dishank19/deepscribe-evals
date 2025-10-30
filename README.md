@@ -94,6 +94,16 @@ uv run python scripts/backfill_judge_baseline.py --input data/augmented/bad_exam
 ```
 When `--output` is omitted the script rewrites the input file in place; only the `llm_judge` payload is updated.
 
+SummaC vs Gold Note
+-------------------
+Grab the transcript-vs-gold SummaC scores so you can eyeball how far the AI deviates from the clinician note:
+```
+uv run python scripts/compute_sumac_gold.py \
+  --input data/augmented/train.jsonl \
+  --output data/augmented/summac_gold.jsonl
+```
+The dashboard reads `summac_gold.jsonl` automatically and shows both the transcript-based SummaC and the gold comparison side by side.
+
 Dashboard & Reporting
 ---------------------
 Launch the Streamlit dashboard against any scored file:
@@ -112,6 +122,13 @@ Metrics Cheat Sheet
 - **ROUGE-L (flag < 0.2)** – low lexical overlap with the gold note; often signals omitted sections or entirely different content.
 - **BERTScore F1 (flag < 0.3)** – low semantic similarity to the gold note; catches paraphrased omissions that ROUGE might miss.
 - **LLM Judge** – richest signal: factuality, completeness, coherence, fluency, issues, and gold-note coverage. Each row stores the clinician baseline (treated as the 5/5 reference) and the AI−gold delta so you can see how far the generated note trails the gold note.
+
+Why these metrics (plain speak)
+-------------------------------
+- **ROUGE + BERTScore first.** They’re not the smartest graders, but they’re cheap and loud. If ROUGE and BERT both tank, something is seriously wrong (bad generation, wrong prompt, API hiccup) and we don’t waste LLM calls digging further. ROUGE looks at literal overlap, BERTScore checks the vibe/semantics, so together they catch both word-level and meaning-level misses.
+- **SummaC on the transcript, then on the gold.** SummaC-ZS is lightweight compared to fancier NLI rigs like UniEval. I run it straight against the transcript to smoke-test hallucinations; the format mismatch means scores skew low, but that’s fine because we only care about relative changes. I also run a second pass against the gold note (see `summac_gold.jsonl`) so we can spot rows where the AI simply diverged from what the clinician wrote, even if it’s technically “supported” by the transcript.
+- **LLM judge for nuance.** The judge is strictly transcript vs. AI. Gold serves as the 5/5 baseline so we can report “AI completeness is −1.2 vs gold” without mixing references in the prompt. The judge spits out missing/unsupported/clinical-error bullet points per section, which makes triage human-friendly when ROUGE/BERTScore are too blunt.
+- **Synthetic “bad” set.** I generate five deliberately crummy SOAPs (minimal prompt, no safeguards) and park them in `data/augmented/bad_examples*.jsonl`. When the metrics light up red on that set I know the pipeline is still behaving; if they ever start giving those notes 4s and 5s we broke something.
 
 Evaluator Quality & Synthetic Data
 ----------------------------------

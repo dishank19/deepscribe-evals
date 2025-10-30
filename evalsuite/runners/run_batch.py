@@ -34,20 +34,33 @@ def load_records(path: Path, start: int = 0, limit: int | None = None) -> Iterat
         yield record
 
 
-def run_metrics(records: Iterable[dict], metric_names: List[str]) -> Iterator[dict]:
-    """Yield records with metrics populated."""
+def run_metrics(records: Iterable[dict], metric_names: List[str], output_path: Path | None = None, append: bool = False) -> Iterator[dict]:
+    """Yield records with metrics populated and optionally stream results to disk."""
 
-    for record in tqdm(records, desc="Evaluating", unit="row", leave=False):
-        metrics = dict(record.get("metrics", {}))
-        for name in metric_names:
-            metric_fn = get_metric(name)
-            params = inspect.signature(metric_fn).parameters
-            if len(params) >= 3:
-                metrics[name] = metric_fn(record["transcript"], record["ai_soap"], record.get("gold_soap"))
-            else:
-                metrics[name] = metric_fn(record["transcript"], record["ai_soap"])
-        record["metrics"] = metrics
-        yield record
+    writer = None
+    if output_path is not None and output_path.suffix.lower() == ".jsonl":
+        mode = "a" if append else "w"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = output_path.open(mode, encoding="utf-8")
+
+    try:
+        for record in tqdm(records, desc="Evaluating", unit="row", leave=False):
+            metrics = dict(record.get("metrics", {}))
+            for name in metric_names:
+                metric_fn = get_metric(name)
+                params = inspect.signature(metric_fn).parameters
+                if len(params) >= 3:
+                    metrics[name] = metric_fn(record["transcript"], record["ai_soap"], record.get("gold_soap"))
+                else:
+                    metrics[name] = metric_fn(record["transcript"], record["ai_soap"])
+            record["metrics"] = metrics
+            if writer is not None:
+                writer.write(json.dumps(record, ensure_ascii=False))
+                writer.write("\n")
+            yield record
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def emit_records(records: Iterable[dict], path: Path | None, append: bool = False) -> None:
@@ -97,9 +110,13 @@ def main() -> None:
     input_path = default_split_path(args.split)
     metric_names = [name.strip() for name in args.metrics.split(",") if name.strip()]
     records = load_records(input_path, start=args.start, limit=args.limit)
-    evaluated = list(run_metrics(records, metric_names))
     output_path = Path(args.output) if args.output else None
-    emit_records(evaluated, output_path, append=args.append)
+    if output_path and output_path.suffix.lower() == ".jsonl":
+        for _ in run_metrics(records, metric_names, output_path=output_path, append=args.append):
+            pass
+    else:
+        evaluated = list(run_metrics(records, metric_names))
+        emit_records(evaluated, output_path, append=args.append)
 
 
 if __name__ == "__main__":
