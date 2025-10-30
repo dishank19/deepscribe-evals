@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import anyio
 from pydantic import BaseModel, Field
@@ -17,8 +17,6 @@ from evalsuite.metrics.registry import register
 
 SECTION_KEYS = ("S", "O", "A", "P")
 SECTION_NAMES = {"S": "Subjective", "O": "Objective", "A": "Assessment", "P": "Plan"}
-
-BASELINE_CACHE: Dict[Tuple[str, Tuple[str, ...]], Dict[str, SectionEvaluation]] = {}
 
 
 class SectionScores(BaseModel):
@@ -114,12 +112,24 @@ def _model_name() -> str:
 
 @lru_cache(maxsize=1)
 def _section_agent() -> Agent:
-    return Agent(model=_model_name(), output_type=SectionEvaluation, system_prompt=SECTION_SYSTEM_PROMPT)
+    return Agent(
+        model=_model_name(),
+        output_type=SectionEvaluation,
+        system_prompt=SECTION_SYSTEM_PROMPT,
+        retries=3,
+        output_retries=3,
+    )
 
 
 @lru_cache(maxsize=1)
 def _coverage_agent() -> Agent:
-    return Agent(model=_model_name(), output_type=CoverageEvaluation, system_prompt=COVERAGE_SYSTEM_PROMPT)
+    return Agent(
+        model=_model_name(),
+        output_type=CoverageEvaluation,
+        system_prompt=COVERAGE_SYSTEM_PROMPT,
+        retries=3,
+        output_retries=3,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -151,23 +161,6 @@ async def _score_note(transcript: str, soap: Dict[str, str]) -> Dict[str, Sectio
         for section in SECTION_KEYS
     ]
     return dict(zip(SECTION_KEYS, await asyncio.gather(*tasks)))
-
-
-def _baseline_cache_key(transcript: str, soap: Dict[str, str]) -> Tuple[str, Tuple[str, ...]]:
-    return (
-        transcript.strip(),
-        tuple((soap.get(section, "") or "").strip() for section in SECTION_KEYS),
-    )
-
-
-async def _score_note_cached(transcript: str, soap: Dict[str, str]) -> Dict[str, SectionEvaluation]:
-    key = _baseline_cache_key(transcript, soap)
-    cached = BASELINE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    result = await _score_note(transcript, soap)
-    BASELINE_CACHE[key] = result
-    return result
 
 
 async def _score_section(section: str, transcript: str, ai_text: str) -> SectionEvaluation:
@@ -283,10 +276,6 @@ def run_llm_judge(transcript: str, ai_soap: Dict[str, str], gold_soap: Optional[
             if tasks:
                 coverage_results = dict(zip(sections, await asyncio.gather(*tasks)))
 
-        baseline_sections: Optional[Dict[str, SectionEvaluation]] = None
-        if gold_soap:
-            baseline_sections = await _score_note_cached(transcript, gold_soap)
-
         scores = {
             "consistency": _average(per_section, "consistency"),
             "completeness": _average(per_section, "completeness"),
@@ -320,21 +309,15 @@ def run_llm_judge(transcript: str, ai_soap: Dict[str, str], gold_soap: Optional[
             if section in coverage_results:
                 payload["coverage"] = json.loads(coverage_results[section].model_dump_json())
 
-            if baseline_sections:
-                baseline_eval = baseline_sections[section]
-                payload["baseline_scores"] = json.loads(baseline_eval.scores.model_dump_json())
-                baseline_overall = round(
-                    (
-                        baseline_eval.scores.consistency
-                        + baseline_eval.scores.completeness
-                        + baseline_eval.scores.coherence
-                        + baseline_eval.scores.fluency
-                    )
-                    / 4.0,
-                    3,
-                )
-                payload["baseline_overall"] = baseline_overall
-                payload["delta_overall"] = round(payload["overall"] - baseline_overall, 3)
+            if gold_soap:
+                payload["baseline_scores"] = {
+                    "consistency": 5.0,
+                    "completeness": 5.0,
+                    "coherence": 5.0,
+                    "fluency": 5.0,
+                }
+                payload["baseline_overall"] = 5.0
+                payload["delta_overall"] = round(payload["overall"] - 5.0, 3)
             sections_payload[section] = payload
 
         result: Dict[str, Dict[str, List[str]]] = {
@@ -345,44 +328,20 @@ def run_llm_judge(transcript: str, ai_soap: Dict[str, str], gold_soap: Optional[
         coverage_summary = _coverage_summary(coverage_results)
         if coverage_summary:
             result["coverage"] = coverage_summary
-
-        if baseline_sections:
+        if gold_soap:
             baseline_scores = {
-                "consistency": _average(baseline_sections, "consistency"),
-                "completeness": _average(baseline_sections, "completeness"),
-                "coherence": _average(baseline_sections, "coherence"),
-                "fluency": _average(baseline_sections, "fluency"),
+                "consistency": 5.0,
+                "completeness": 5.0,
+                "coherence": 5.0,
+                "fluency": 5.0,
             }
-            baseline_scores["coverage"] = 5.0 if coverage_results else None
-
-            baseline_sections_payload = {}
-            for section, evaluation in baseline_sections.items():
-                baseline_sections_payload[section] = {
-                    "scores": json.loads(evaluation.scores.model_dump_json()),
-                    "issues": json.loads(evaluation.issues.model_dump_json()),
-                    "summary": evaluation.summary,
-                    "overall": round(
-                        (
-                            evaluation.scores.consistency
-                            + evaluation.scores.completeness
-                            + evaluation.scores.coherence
-                            + evaluation.scores.fluency
-                        )
-                        / 4.0,
-                        3,
-                    ),
-                }
-
+            if "coverage" in scores:
+                baseline_scores["coverage"] = 5.0
             score_deltas = {
-                metric: round(scores.get(metric, 0.0) - baseline_scores.get(metric, 0.0), 3)
-                for metric in ["consistency", "completeness", "coherence", "fluency"]
+                metric: round(scores.get(metric, 0.0) - baseline_scores.get(metric, 5.0), 3)
+                for metric in baseline_scores
             }
-            if coverage_results:
-                score_deltas["coverage"] = round(scores.get("coverage", 0.0) - 5.0, 3)
-            elif "coverage" in scores:
-                score_deltas["coverage"] = None
-
-            result["baseline"] = {"scores": baseline_scores, "sections": baseline_sections_payload}
+            result["baseline"] = {"scores": baseline_scores}
             result["deltas"] = score_deltas
 
         return result
