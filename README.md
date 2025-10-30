@@ -68,6 +68,15 @@ Outputs
 - Dashboard config expects scored files under `data/augmented/`.
 - To backfill new metrics onto an existing scored file without recomputing others, load the JSONL, call the target metric functions (e.g., ROUGE, BERTScore), and rewrite the updated rows in place.
 
+Metrics Cheat Sheet
+-------------------
+- **SummaC** – fast transcript → note factuality gate; rows with overall `< 0.6` are highlighted.
+- **ROUGE-L** – lexical overlap between AI SOAP and gold SOAP; rows with overall ROUGE-L `< 0.2` are flagged in the dashboard.
+- **BERTScore F1** – semantic similarity to the gold SOAP; rows with overall F1 `< 0.3` are flagged.
+- **LLM Judge** – section-level completeness/consistency/coherence/fluency plus issue lists and optional coverage against the gold note.
+
+When the dashboard “Show only flagged rows” toggle is enabled, you’ll see the subset with low ROUGE/BERTScore sanity checks for rapid triage before deeper review.
+
 Next Steps
 ----------
 - Periodically sample the scored file to confirm the LLM judge still returns valid payloads after prompt/model tweaks.
