@@ -45,11 +45,11 @@ METRIC_DESCRIPTIONS = {
 
 OVERVIEW_SYSTEM_PROMPT = """
 You are helping a clinical QA team interpret automated SOAP-note evaluations.
-Given dataset statistics captured in JSON, write at most 3 tight sentences covering:
-- overall consistency and coverage trends,
-- common missing or unsupported findings,
-- any reliability caveats or follow-up actions.
-Return the OverviewSummary JSON exactly.
+Given aggregate metrics in JSON, write at most 3 concise sentences that:
+- describe high-level consistency/completeness trends without citing patient-specific details,
+- summarize the most common issue categories generically (e.g., missing Objective data, unsupported Assessment claims),
+- call out any follow-up actions or caveats (re-run judge, review low SummaC rows).
+Do not mention specific diseases, genetic markers, or lab values. Return the OverviewSummary JSON exactly.
 """.strip()
 
 
