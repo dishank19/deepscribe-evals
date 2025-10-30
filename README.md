@@ -1,7 +1,7 @@
 DeepScribe SOAP Evaluation Suite
 ================================
 
-Quick-start guide for building the augmented dataset, running the evaluation metrics, and inspecting results. GitHub repo: [dishank19/deepscribe-evals](https://github.com/dishank19/deepscribe-evals).
+Quick-start guide for building the augmented dataset, running the evaluation metrics, and inspecting results.
 
 Environment Setup
 -----------------
@@ -11,12 +11,12 @@ Environment Setup
 
 Data Processing Pipeline
 ------------------------
-1. **Source transcripts & gold notes.** I pull rows from `omi-health/medical-dialogue-to-soap-summary` via `datasets`. The split and slice are controlled by `scripts/build_dataset.py`.
+1. **Source transcripts & gold notes.** We pull rows from `omi-health/medical-dialogue-to-soap-summary` via `datasets`. The split and slice are controlled by `scripts/build_dataset.py`.
 2. **Gold SOAP parsing.** `evalsuite/dataset.py::parse_soap` normalises the labelled blocks (`S/O/A/P`) into structured dictionaries, preserving multi-line content.
 3. **AI SOAP generation.** `evalsuite/gen/pydantic_claude.py` streams each transcript through a Pydantic-AI agent (Claude backend) that returns schema-validated SOAP sections. Generation retries are handled inside the agent wrapper so malformed responses never hit disk.
-4. **Augmented dataset write.** `scripts/build_dataset.py` emits JSONL files under `data/augmented/<split>.jsonl` containing `transcript`, `gold_soap`, `ai_soap`, and an empty `metrics` stub. By default I cap at 100 rows (`--limit 100`) to keep iteration fast; drop the flag to cover the full split. All generated data lives under `data/augmented/` and is checked into the repo for convenience.
-5. **Synthetic stress set.** `data/augmented/bad_examples.jsonl` holds five transcripts that were not part of the first 100 rows. Their AI SOAP sections are intentionally degraded (empty sections, hallucinated facts, etc.) so I can sanity-check the evaluator on obviously bad output. Generate it with `scripts/create_bad_examples.py`.
-> Assumption: The SOAP note that ships with the OMI dataset is already the clinician-edited gold reference. I treat it as such and only generate the AI SOAP myself.
+4. **Augmented dataset write.** `scripts/build_dataset.py` emits JSONL files under `data/augmented/<split>.jsonl` containing `transcript`, `gold_soap`, `ai_soap`, and an empty `metrics` stub. By default we cap at 100 rows (`--limit 100`) to keep iteration fast; drop the flag to cover the full split.
+5. **Synthetic stress set.** `data/augmented/bad_examples.jsonl` holds five transcripts that were not part of the first 100 rows. Their AI SOAP sections are intentionally degraded (empty sections, hallucinated facts, etc.) so we can sanity-check the evaluator on obviously bad output. Generate it with `scripts/create_bad_examples.py`.
+> Assumption: The SOAP note that ships with the OMI dataset is already the clinician-edited gold reference. We treat it as such and only generate the AI SOAP ourselves.
 
 Common dataset operations:
 ```
@@ -40,11 +40,11 @@ uv run python -m evalsuite.runners.run_batch \
 Evaluation Metrics & Code Layout
 --------------------------------
 - **SummaC (`evalsuite/metrics/summac_eval.py`)**  
-  Compares each AI section to the transcript with an NLI model. The overall gate now uses a 0.45 threshold: transcripts contain a lot of clinical shorthand, so exact entailment scores sit lower than general summarisation corpora. A low bar keeps recall high—SummaC acts as a fast “smoke check” before heavier metrics run. Because SummaC only sees the transcript, it cannot spot mismatches against the gold note; I rely on ROUGE/BERTScore (and the SummaC-vs-gold export) for that.
+  Compares each AI section to the transcript with an NLI model. The overall gate now uses a 0.45 threshold: transcripts contain a lot of clinical shorthand, so exact entailment scores sit lower than general summarisation corpora. A low bar keeps recall high—SummaC acts as a fast “smoke check” before heavier metrics run. Because SummaC only sees the transcript, it cannot spot mismatches against the gold note; we rely on ROUGE/BERTScore for that.
 - **ROUGE (`evalsuite/metrics/rouge_eval.py`)**  
   Uses `rouge-score` to compute ROUGE-L per section and overall. Scores below 0.2 usually signal missing sections or entirely different content; these rows are flagged in the dashboard.
 - **BERTScore (`evalsuite/metrics/bert_score_eval.py`)**  
-  Computes precision/recall/F1 against the gold SOAP (`roberta-large`, baseline-rescaled). An overall F1 under 0.3 is a strong indication the generated note deviates semantically, so I flag those rows as well.
+  Computes precision/recall/F1 against the gold SOAP (`roberta-large`, baseline-rescaled). An overall F1 under 0.3 is a strong indication the generated note deviates semantically, so we flag those rows as well.
 - **LLM Judge (`evalsuite/metrics/llm_judge.py`)**  
   Cerebras-based Pydantic agent that delivers section-level scores (consistency, completeness, coherence, fluency), issue lists, and optional coverage when a gold note is available. Retries + schema enforcement ensure every row yields structured output.
 
@@ -108,7 +108,7 @@ Features:
 - “Show only flagged rows” toggle surfaces the subset with low ROUGE/BERTScore for rapid triage.
 - Row explorer exposes filters, per-section judge breakdowns, and links to transcripts/gold notes.
 
-Metrics Cheat Sheet
+Metrics Thresholds
 -------------------
 - **SummaC (threshold 0.45)** – fast transcript vs. AI gate; below-threshold rows suggest hallucination risk or missing transcript coverage.
 - **ROUGE-L (flag < 0.2)** – low lexical overlap with the gold note; often signals omitted sections or entirely different content.
@@ -117,9 +117,9 @@ Metrics Cheat Sheet
 
 Why these metrics
 -------------------------------
-- **ROUGE + BERTScore first.** These aren’t perfect evaluators, but they are cheap alerts. I run them first to catch “something is very wrong” cases (bad generation, wrong prompt, API glitch) before burning LLM credits. ROUGE handles lexical overlap, BERTScore covers semantics.
-- **SummaC on the transcript, then on the gold.** SummaC-ZS is lightweight compared to bigger NLI rigs like UniEval. I run it against the transcript to smoke-test hallucinations—yes, the format mismatch keeps scores lower, but I only care about relative changes. Then I run SummaC against the gold note (`summac_gold.jsonl`) to see how far the AI drifted from the clinician edit.
-- **LLM judge for nuance.** The judge is transcript vs. AI only; gold serves as the 5/5 baseline so I can report deltas without putting the gold note into the prompt. It gives per-section scores and missing/unsupported/clinical-error bullets that are way easier to triage than raw numbers.
+- **ROUGE + BERTScore first.**: The way i see this is that these arent great metrics to evaluate but they are great signals. The idea with using them is to run them first and understand quickly if something is very wrong with the summary. Thats why there is a check for scores that are abnormally low. This is to help filter out if there were issues with the generation, api etc without having to move on to more resource intensive tasks. A combination of rouge (lexical) and bert(semantic) is a great because you get the best of both worlds, semantic and word to word matching.
+- **SummaC on the transcript, then on the gold.** SummaC-ZS is lightweight compared to  NLI metrics like UniEval. I run it against the transcript to essentially do a quick smoke test for hallucinations, there is format mismatch which means the scores are a bit low, but that’s fine because I only care about relative changes, abnormally low scores would point to missing important pieces of text or hallucinations. I also run a second pass against the gold note (see `summac_gold.jsonl`) so we can spot rows where the AI simply diverged from what the clinician wrote, even if it’s technically “supported” by the transcript.
+- **LLM judge for nuance.** The judge is strictly transcript vs. AI. Gold serves as the 5/5 baseline so we can report “AI completeness is −1.2 vs gold” without mixing references in the prompt. The judge spits out missing/unsupported/clinical-error bullet points per section, which makes it human-friendly when ROUGE/BERTScore are too blunt. This is generally a lot more resource and time consuming, but I think its the best to be used in production because i do not require a clinician note here. I believe the current models are **extremely** capable in evaluations and can help filter out very small nuances that even humans can miss. From a production perspective this is the best metric. 
 - **Synthetic “bad” set.** I generate five deliberately okayish SOAPs (minimal prompt) in `data/augmented/bad_examples*.jsonl`. The signal i am looking for is extremely low numbers. When and if they ever start giving those notes 4s and 5s I have broke something.
 I also did a few 'vibe tests' basically just reading each input, output, scores to understand what the model really valued and what it did not. I did consider prompt optimization(GEPA/dspy) to better understand how my evals work but ignored since it was too much effort. 
 Another way to check if the evals really worked was to create the same ai soap with bad and good prompts, no validation etc. 
